@@ -22,12 +22,12 @@ from sklearn.metrics import (
 # ============================================================
 
 # 검증 데이터와 테스트 데이터의 기간(일)
-VALIDATION_DAYS = 15
-TEST_DAYS = 15
+VALIDATION_DAYS = 30
+TEST_DAYS = 30
 
 # 조기 종료 설정
-EARLY_STOPPING_ROUNDS = 50
-MAX_ITERATIONS = 1000
+EARLY_STOPPING_ROUNDS = 200
+MAX_ITERATIONS = 2000
 
 # 재현성을 위한 난수 시드
 RANDOM_STATE = 42
@@ -36,7 +36,7 @@ RANDOM_STATE = 42
 DATASET_FILENAME = "df_weather_강릉_30day_dataset.csv"
 
 # 결과 저장 폴더명
-OUTPUT_DIRNAME = "weather_training_results"
+OUTPUT_DIRNAME = "weather_training_results2"
 
 # 모델 학습에 사용할 Target
 REGRESSION_TARGETS = [

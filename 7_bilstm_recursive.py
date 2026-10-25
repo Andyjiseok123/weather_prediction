@@ -16,7 +16,7 @@ from tensorflow.keras.callbacks import EarlyStopping
 
 DATA_START_DATE = "2016-01-01"
 
-LOOKBACK = 14
+LOOKBACK = 14   #time steps for the LSTM input sequence
 EPOCHS = 50
 BATCH_SIZE = 32
 TRAIN_RATIO = 0.8

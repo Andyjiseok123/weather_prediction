@@ -1,3 +1,4 @@
+# python train_models.py --start-date 2016-01-01
 import argparse
 import pickle
 import traceback

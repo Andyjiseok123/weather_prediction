@@ -1,3 +1,5 @@
+# python predict_weather.py --model-id "강릉__강원특별자치도_LSTM_WS_AVG" --target-date 2026-11-05
+# 학습이 완료된 모델을 사용하여 목표 날짜의 Y를 예측합니다.
 import argparse
 import pickle
 from pathlib import Path

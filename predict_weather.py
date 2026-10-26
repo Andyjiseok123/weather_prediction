@@ -1,4 +1,6 @@
-mport argparse
+# python predict_weather.py --model-id "강릉__강원특별자치도_LSTM_WS_AVG" --target-date 2026-11-05
+# 학습이 완료된 모델을 사용하여 목표 날짜의 Y를 예측합니다.
+import argparse
 import pickle
 from pathlib import Path
 
@@ -9,6 +11,7 @@ import tensorflow as tf
 from weather_model import (
     load_dataset,
     recursive_forecast_x,
+    create_lightgbm_features
 )
 
 
@@ -21,6 +24,7 @@ def predict_one_dataset(
     model_path = model_dir / model_id
 
     metadata_path = model_path / "metadata.pkl"
+    lightgbm_model_path = model_path / "lightgbm_model.pkl"
     x_model_path = model_path / "x_model.keras"
     y_model_path = model_path / "y_model.keras"
 
@@ -110,13 +114,21 @@ def predict_one_dataset(
     # 4. 모델 로드
     # -----------------------------------------------------
 
-    if not x_model_path.exists() or not y_model_path.exists():
+    if (
+        not x_model_path.exists()
+        or not y_model_path.exists()
+        or not lightgbm_model_path.exists()
+    ):
         raise FileNotFoundError(
-            f"저장된 모델 파일이 없습니다: {model_path}"
+            f"저장된 모델 파일이 없습니다: {model_path}\n"
+            "train_models.py를 다시 실행해 주세요."
         )
 
     model_x = tf.keras.models.load_model(x_model_path)
     model_y = tf.keras.models.load_model(y_model_path)
+
+    with open(lightgbm_model_path, "rb") as f:
+        model_lgbm = pickle.load(f)
 
     # -----------------------------------------------------
     # 5. 목표 날짜까지 X 재귀 예측
@@ -150,12 +162,61 @@ def predict_one_dataset(
         len(x_columns)
     )
 
+    # ------------------------------------------
+    # Bi-LSTM Y 예측
+    # ------------------------------------------
     y_pred_scaled = model_y.predict(
         X_target_sequence,
         verbose=0
     )
 
-    y_pred = y_scaler.inverse_transform(y_pred_scaled)[0, 0]
+    y_pred_bilstm = float(
+        y_scaler.inverse_transform(y_pred_scaled)[0, 0]
+    )
+
+    # ------------------------------------------
+    # LightGBM Feature 생성 및 Y 예측
+    # ------------------------------------------
+    lgbm_features = create_lightgbm_features(
+        combined_X_raw, x_columns
+    )
+
+    lgbm_target_features = lgbm_features.iloc[[-1]].copy()
+
+    # 학습 시 저장한 Feature 순서에 맞춤
+    lgbm_target_features = lgbm_target_features[
+        metadata["lgbm_feature_columns"]
+    ]
+
+    if lgbm_target_features.isna().any().any():
+        raise ValueError(
+            "목표 날짜 LightGBM Feature에 결측치가 있습니다. "
+            "365일 LAG 계산에 필요한 과거 이력을 확인하세요."
+        )
+
+    y_pred_lgbm = float(
+        model_lgbm.predict(lgbm_target_features)[0]
+    )
+
+    # ------------------------------------------
+    # 앙상블
+    # ------------------------------------------
+    weight_bilstm = float(
+        metadata.get("ensemble_bilstm_weight", 0.5)
+    )
+    weight_lgbm = float(
+        metadata.get("ensemble_lightgbm_weight", 0.5)
+    )
+
+    weight_sum = weight_bilstm + weight_lgbm
+
+    if weight_sum <= 0:
+        raise ValueError("앙상블 가중치의 합은 0보다 커야 합니다.")
+
+    y_pred = (
+        weight_bilstm * y_pred_bilstm
+        + weight_lgbm * y_pred_lgbm
+    ) / weight_sum
 
     # 미래 X 중 목표 날짜에 해당하는 마지막 행
     target_X = future_X_raw[-1]
@@ -171,6 +232,9 @@ def predict_one_dataset(
             for col, value in zip(x_columns, target_X)
         },
         "forecast_days": len(future_dates),
+        "predicted_y": float(y_pred),
+        "predicted_y_bilstm": y_pred_bilstm,
+        "predicted_y_lightgbm": y_pred_lgbm,
     }
 
     return result
@@ -226,6 +290,9 @@ def main():
     print(f"예측 대상 Y   : {result['target_column']}")
     print(f"예측 Y 값     : {result['predicted_y']:.6f}")
     print(f"재귀 예측 일수: {result['forecast_days']}일")
+    print(f"Bi-LSTM Y 예측 : {result['predicted_y_bilstm']:.6f}")
+    print(f"LightGBM Y 예측: {result['predicted_y_lightgbm']:.6f}")
+    print(f"앙상블 Y 예측  : {result['predicted_y']:.6f}")
 
     print("\n[목표 날짜의 예측 X]")
     for column, value in result["predicted_x"].items():

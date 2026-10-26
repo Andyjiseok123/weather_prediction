@@ -8,8 +8,8 @@ import pandas as pd
 # ==================================================
 
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_DIR = BASE_DIR / "df_weather_bf_process"
-OUTPUT_DIR = BASE_DIR / "df_weather_preprocessed"
+INPUT_DIR = BASE_DIR / "1_df_weather_bf_process"
+OUTPUT_DIR = BASE_DIR / "2_df_weather_preprocessed"
 
 
 # ==================================================

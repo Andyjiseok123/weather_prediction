@@ -5,7 +5,7 @@ import pandas as pd
 
 
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_DIR = BASE_DIR / "3_df_weather_drop"
+INPUT_DIR = BASE_DIR / "3.5_df_weather_wind_feature"
 REVIEW_DIR = BASE_DIR / "4_correlation_review"
 OUTPUT_DIR = BASE_DIR / "5_dataset_correlation_threshold"
 

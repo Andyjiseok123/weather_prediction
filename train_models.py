@@ -9,6 +9,7 @@ import tensorflow as tf
 
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from lightgbm import LGBMRegressor
 
 from weather_model import (
     LOOKBACK,
@@ -19,6 +20,7 @@ from weather_model import (
     build_y_model,
     fit_model,
     recursive_forecast_x,
+    create_lightgbm_features,
 )
 
 
@@ -47,14 +49,7 @@ def validate_pipeline(
     epochs,
     batch_size,
 ):
-    """
-    시간 순서 검증:
-    1. 앞쪽 데이터로 스케일러 학습
-    2. 앞쪽 데이터로 X/Y 모델 학습
-    3. 검증 구간의 X를 재귀 예측
-    4. 예측된 X로 검증 구간의 Y를 예측
-    """
-
+    # 시간 순서 기반 학습/검증 분할
     X_train_raw = X_raw[:split_index]
     y_train_raw = y_raw[:split_index]
 
@@ -67,16 +62,14 @@ def validate_pipeline(
     X_train_scaled = X_scaler.transform(X_train_raw)
     y_train_scaled = y_scaler.transform(y_train_raw)
 
-    # 검증 구간 이전 데이터만으로 학습 샘플 구성
+    # Stage 1: Bi-LSTM X 예측 모델
     X_x_train, y_x_train = create_x_sequences(
-        X_train_scaled,
-        lookback
+        X_train_scaled, lookback
     )
 
+    # Stage 2: Bi-LSTM Y 예측 모델
     X_y_train, y_y_train = create_y_sequences(
-        X_train_scaled,
-        y_train_scaled,
-        lookback
+        X_train_scaled, y_train_scaled, lookback
     )
 
     n_features = X_raw.shape[1]
@@ -89,7 +82,7 @@ def validate_pipeline(
         X_x_train,
         y_x_train,
         epochs=epochs,
-        batch_size=batch_size
+        batch_size=batch_size,
     )
 
     fit_model(
@@ -97,10 +90,10 @@ def validate_pipeline(
         X_y_train,
         y_y_train,
         epochs=epochs,
-        batch_size=batch_size
+        batch_size=batch_size,
     )
 
-    # 검증 구간 전체의 X를 하루씩 재귀 예측
+    # 검증 구간 X를 재귀 예측
     validation_dates = dates[split_index:]
 
     predicted_X_raw = recursive_forecast_x(
@@ -109,30 +102,29 @@ def validate_pipeline(
         x_columns=x_columns,
         history_X_raw=X_train_raw,
         future_dates=validation_dates,
-        lookback=lookback
+        lookback=lookback,
     )
 
-    # X 예측 성능
     true_X_validation = X_raw[split_index:]
 
     x_mae = mean_absolute_error(
-        true_X_validation,
-        predicted_X_raw
+        true_X_validation, predicted_X_raw
     )
-
     x_rmse = np.sqrt(
         mean_squared_error(
-            true_X_validation,
-            predicted_X_raw
+            true_X_validation, predicted_X_raw
         )
     )
 
-    # 실제 검증 X 대신 Model A가 예측한 X를 사용
+    # 검증 구간에는 실제 미래 X 대신 재귀 예측 X 사용
     combined_X_raw = np.vstack([
         X_train_raw,
-        predicted_X_raw
+        predicted_X_raw,
     ])
 
+    # ------------------------------------------
+    # Bi-LSTM Y 예측
+    # ------------------------------------------
     combined_X_scaled = X_scaler.transform(combined_X_raw)
 
     X_y_validation = []
@@ -147,25 +139,134 @@ def validate_pipeline(
 
     X_y_validation = np.asarray(
         X_y_validation,
-        dtype=np.float32
+        dtype=np.float32,
     )
 
-    y_pred_scaled = model_y.predict(
+    y_pred_bilstm_scaled = model_y.predict(
         X_y_validation,
-        verbose=0
+        verbose=0,
     )
 
-    y_pred = y_scaler.inverse_transform(y_pred_scaled)
-    y_true = y_raw[split_index:]
+    y_pred_bilstm = y_scaler.inverse_transform(
+        y_pred_bilstm_scaled
+    ).ravel()
 
-    y_mae = mean_absolute_error(y_true, y_pred)
-    y_rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    y_true = y_raw[split_index:].ravel()
+
+    # ------------------------------------------
+    # LightGBM Y 예측
+    # ------------------------------------------
+    
+    # 학습 Feature: 학습 구간의 관측 X
+    train_features = create_lightgbm_features(
+        X_train_raw, x_columns
+    )
+
+    # 결측치가 없는 행만 학습에 사용
+    train_valid_mask = (
+        train_features.notna().all(axis=1).to_numpy(
+            dtype=bool,
+            copy=True,
+        )
+    )
+
+    # 무한대 값이 포함된 행도 제외
+    train_valid_mask = (
+        train_valid_mask
+        & np.isfinite(
+            train_features.to_numpy()
+        ).all(axis=1)
+    )
+
+    train_valid_mask &= np.isfinite(
+        train_features.to_numpy()
+    ).all(axis=1)
+
+    if train_valid_mask.sum() < 20:
+        raise ValueError(
+            "LightGBM 학습에 유효한 데이터가 부족합니다. "
+            "365일 LAG를 사용하므로 데이터 길이를 확인하세요."
+        )
+
+    lgbm_model = LGBMRegressor(
+        objective="regression",
+        n_estimators=500,
+        learning_rate=0.03,
+        num_leaves=31,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42,
+        verbosity=-1,
+    )
+
+    lgbm_model.fit(
+        train_features.loc[train_valid_mask],
+        y_train_raw.ravel()[train_valid_mask],
+    )
+
+    # 검증 Feature: 실제 과거 X + 재귀 예측 미래 X
+    all_features = create_lightgbm_features(
+        combined_X_raw, x_columns
+    )
+
+    validation_features = all_features.iloc[
+        split_index:
+    ].copy()
+
+    validation_features = validation_features.replace(
+        [np.inf, -np.inf], np.nan
+    )
+
+    if validation_features.isna().any().any():
+        raise ValueError(
+            "검증 Feature에 결측치가 있습니다. "
+            "365일 LAG 및 관측 이력을 확인하세요."
+        )
+
+    y_pred_lgbm = lgbm_model.predict(
+        validation_features
+    )
+
+    # 초기 앙상블: 두 모델 동일 가중치
+    y_pred_ensemble = (
+        0.5 * y_pred_bilstm
+        + 0.5 * y_pred_lgbm
+    )
+
+    def calc_metrics(y_actual, y_pred):
+        return {
+            "mae": float(
+                mean_absolute_error(y_actual, y_pred)
+            ),
+            "rmse": float(
+                np.sqrt(
+                    mean_squared_error(y_actual, y_pred)
+                )
+            ),
+        }
+
+    bilstm_metrics = calc_metrics(
+        y_true, y_pred_bilstm
+    )
+    lgbm_metrics = calc_metrics(
+        y_true, y_pred_lgbm
+    )
+    ensemble_metrics = calc_metrics(
+        y_true, y_pred_ensemble
+    )
 
     return {
         "x_mae": float(x_mae),
         "x_rmse": float(x_rmse),
-        "y_mae": float(y_mae),
-        "y_rmse": float(y_rmse),
+
+        "y_bilstm_mae": bilstm_metrics["mae"],
+        "y_bilstm_rmse": bilstm_metrics["rmse"],
+
+        "y_lightgbm_mae": lgbm_metrics["mae"],
+        "y_lightgbm_rmse": lgbm_metrics["rmse"],
+
+        "y_ensemble_mae": ensemble_metrics["mae"],
+        "y_ensemble_rmse": ensemble_metrics["rmse"],
     }
 
 
@@ -232,10 +333,25 @@ def train_one_csv(
     )
 
     print("\n[재귀 예측 기반 검증 결과]")
-    print(f"X MAE  : {metrics['x_mae']:.6f}")
-    print(f"X RMSE : {metrics['x_rmse']:.6f}")
-    print(f"Y MAE  : {metrics['y_mae']:.6f}")
-    print(f"Y RMSE : {metrics['y_rmse']:.6f}")
+    print(
+        f"X MAE / RMSE: "
+        f"{metrics['x_mae']:.6f} / {metrics['x_rmse']:.6f}"
+    )
+    print(
+        f"Y Bi-LSTM MAE / RMSE: "
+        f"{metrics['y_bilstm_mae']:.6f} / "
+        f"{metrics['y_bilstm_rmse']:.6f}"
+    )
+    print(
+        f"Y LightGBM MAE / RMSE: "
+        f"{metrics['y_lightgbm_mae']:.6f} / "
+        f"{metrics['y_lightgbm_rmse']:.6f}"
+    )
+    print(
+        f"Y Ensemble MAE / RMSE: "
+        f"{metrics['y_ensemble_mae']:.6f} / "
+        f"{metrics['y_ensemble_rmse']:.6f}"
+    )
 
     # -----------------------------------------------------
     # 2. 최종 모델 재학습
@@ -281,6 +397,52 @@ def train_one_csv(
         epochs=epochs,
         batch_size=batch_size
     )
+    print("LightGBM Y 모델 학습 중...")
+
+    lgbm_features = create_lightgbm_features(
+        X_raw, x_columns
+    )
+
+    # 결측치가 없는 행을 선택하고, 수정 가능한 bool 배열로 생성
+    lgbm_valid_mask = (
+        lgbm_features
+        .notna()
+        .all(axis=1)
+        .to_numpy(dtype=bool, copy=True)
+    )
+
+    # 무한대 값이 포함된 행도 제외
+    lgbm_valid_mask = (
+        lgbm_valid_mask
+        & np.isfinite(
+            lgbm_features.to_numpy()
+        ).all(axis=1)
+    )
+
+    if lgbm_valid_mask.sum() < 20:
+        raise ValueError(
+            "LightGBM 학습에 유효한 Feature가 부족합니다."
+        )
+
+    final_lgbm_model = LGBMRegressor(
+        objective="regression",
+        n_estimators=500,
+        learning_rate=0.03,
+        num_leaves=31,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42,
+        verbosity=-1,
+    )
+
+    final_lgbm_model.fit(
+        lgbm_features.loc[lgbm_valid_mask],
+        y_raw.ravel()[lgbm_valid_mask],
+    )
+
+    lgbm_feature_columns = list(
+        lgbm_features.columns
+    )
 
     # -----------------------------------------------------
     # 3. 모델 및 메타데이터 저장
@@ -292,6 +454,10 @@ def train_one_csv(
 
     final_x_model.save(model_dir / "x_model.keras")
     final_y_model.save(model_dir / "y_model.keras")
+    with open(
+        model_dir / "lightgbm_model.pkl", "wb"
+    ) as f:
+        pickle.dump(final_lgbm_model, f)
 
     metadata = {
         "model_id": model_id,
@@ -308,6 +474,9 @@ def train_one_csv(
         "x_scaler": x_scaler,
         "y_scaler": y_scaler,
         "validation_metrics": metrics,
+        "lgbm_feature_columns": lgbm_feature_columns,
+        "ensemble_bilstm_weight": 0.5,
+        "ensemble_lightgbm_weight": 0.5,
     }
 
     with open(model_dir / "metadata.pkl", "wb") as f:

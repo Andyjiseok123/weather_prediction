@@ -4,8 +4,8 @@ import pandas as pd
 
 
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_DIR = BASE_DIR / "df_weather_drop"
-OUTPUT_DIR = BASE_DIR / "correlation_review"
+INPUT_DIR = BASE_DIR / "3.5_df_weather_wind_feature"
+OUTPUT_DIR = BASE_DIR / "4_correlation_review"
 
 TARGET_COLUMNS = [
     "WS_AVG",

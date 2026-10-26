@@ -2,8 +2,8 @@
 import os
 import pandas as pd
 
-INPUT_PATH = './df_weather_preprocessed'
-OUTPUT_PATH = './df_weather_drop'
+INPUT_PATH = './2_df_weather_preprocessed'
+OUTPUT_PATH = './3_df_weather_drop'
 
 DROP_RAW_COLUMNS = [
     "WS_MAX_TM",
@@ -19,6 +19,7 @@ DROP_RAW_COLUMNS = [
     "RN_POW_MAX_TM",
     "SD_NEW_TM",
     "SD_MAX_TM",
+    "WD_INS",
 ]
 
 for f in os.listdir(INPUT_PATH):

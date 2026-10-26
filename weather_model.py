@@ -213,6 +213,75 @@ def update_calendar_features(x_row, x_columns, date):
 
     return row
 
+# =========================================================
+# LightGBM feature 생성
+# =========================================================
+
+def create_lightgbm_features(X_raw, x_columns):
+    """
+    원본 X와 파생 Feature를 결합해 LightGBM 입력을 생성한다.
+
+    Feature:
+    - TA_RANGE = TA_MAX - TA_MIN
+    - 모든 X의 1일/365일 LAG
+    - 모든 X의 7일 Rolling Mean/Std
+    """
+
+    X_raw = np.asarray(X_raw, dtype=np.float32)
+
+    if X_raw.ndim != 2 or X_raw.shape[1] != len(x_columns):
+        raise ValueError(
+            "X_raw의 shape과 x_columns 길이가 일치하지 않습니다."
+        )
+
+    base_df = pd.DataFrame(X_raw, columns=list(x_columns))
+    features = base_df.copy()
+
+    # 1. 일교차
+    column_lookup = {
+        str(col).strip().upper(): col
+        for col in base_df.columns
+    }
+
+    ta_max_col = column_lookup.get("TA_MAX")
+    ta_min_col = column_lookup.get("TA_MIN")
+
+    if ta_max_col is not None and ta_min_col is not None:
+        range_name = "TA_RANGE"
+
+        if range_name in features.columns:
+            range_name = "TA_MAX_MINUS_TA_MIN"
+
+        features[range_name] = (
+            base_df[ta_max_col] - base_df[ta_min_col]
+        )
+
+    # 2. LAG 및 3. Rolling
+    for col in x_columns:
+        features[f"{col}_LAG_1"] = base_df[col].shift(1)
+        features[f"{col}_LAG_365"] = base_df[col].shift(365)
+
+        features[f"{col}_ROLL_MEAN_7"] = (
+            base_df[col].rolling(
+                window=7,
+                min_periods=7
+            ).mean()
+        )
+
+        features[f"{col}_ROLL_STD_7"] = (
+            base_df[col].rolling(
+                window=7,
+                min_periods=7
+            ).std()
+        )
+
+    features = features.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    return features
+
 
 # =========================================================
 # 시계열 데이터 생성
@@ -291,7 +360,7 @@ def build_x_model(lookback, n_features):
     model.compile(
         optimizer="adam",
         loss="mse",
-        metrics=["mae"]
+        metrics=["mse"]
     )
 
     return model
@@ -327,7 +396,7 @@ def build_y_model(lookback, n_features):
     model.compile(
         optimizer="adam",
         loss="mse",
-        metrics=["mae"]
+        metrics=["mse"]
     )
 
     return model

@@ -406,32 +406,46 @@ def build_y_model(lookback, n_features):
 # 모델 학습
 # =========================================================
 
-def fit_model(model, X_train, y_train, epochs=50, batch_size=32):
-    """
-    학습 데이터의 뒤쪽 일부를 검증 데이터로 사용한다.
-    """
+def build_dense_ensemble_model(n_inputs=2):
+    """Bi-LSTM과 LightGBM의 예측값 2개를 결합하는 Dense stacking 모델."""
+    inputs = Input(shape=(n_inputs,), name="base_model_predictions")
+    x = Dense(16, activation="relu", name="ensemble_dense_1")(inputs)
+    x = Dense(8, activation="relu", name="ensemble_dense_2")(x)
+    outputs = Dense(1, activation="linear", name="ensemble_y")(x)
 
-    callbacks = [
-        EarlyStopping(
-            monitor="val_loss",
-            patience=7,
-            restore_best_weights=True
-        )
-    ]
+    model = Model(inputs=inputs, outputs=outputs, name="Dense_Stacking_Ensemble")
+    model.compile(optimizer="adam", loss="mse", metrics=["mse"])
+    return model
 
-    validation_split = 0.1 if len(X_train) >= 20 else 0.0
 
-    model.fit(
-        X_train,
-        y_train,
-        epochs=epochs,
-        batch_size=batch_size,
-        validation_split=validation_split,
-        callbacks=callbacks if validation_split > 0 else [],
-        shuffle=False,
-        verbose=0
-    )
+def fit_model(
+    model, X_train, y_train, epochs=50, batch_size=32,
+    validation_data=None, return_history=False, early_stopping=True
+):
+    """모델을 학습하고 필요하면 epoch별 loss 이력을 반환한다."""
+    callbacks = []
+    validation_split = 0.1 if validation_data is None and len(X_train) >= 20 else 0.0
 
+    if early_stopping and (validation_data is not None or validation_split > 0):
+        callbacks.append(EarlyStopping(
+            monitor="val_loss", patience=7, restore_best_weights=True
+        ))
+
+    fit_kwargs = {
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "callbacks": callbacks,
+        "shuffle": False,
+        "verbose": 0,
+    }
+    if validation_data is not None:
+        fit_kwargs["validation_data"] = validation_data
+    else:
+        fit_kwargs["validation_split"] = validation_split
+
+    history = model.fit(X_train, y_train, **fit_kwargs)
+    if return_history:
+        return model, history.history
     return model
 
 
